@@ -119,11 +119,21 @@ struct SendTokenRequest {
     amount: u64,
 }
 
+fn error<T>(msg: &str) -> (StatusCode, Json<ApiResponse<T>>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse {
+            success: false,
+            data: None,
+            error: Some(msg.to_string()),
+        }),
+    )
+}
+
 async fn generate_keypair_handler() -> (StatusCode, Json<ApiResponse<KeypairData>>) {
     let keypair = Keypair::new();
     let pubkey = bs58::encode(keypair.pubkey().to_bytes()).into_string();
     let secret = bs58::encode(&keypair.to_bytes()).into_string();
-
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -137,34 +147,17 @@ async fn generate_keypair_handler() -> (StatusCode, Json<ApiResponse<KeypairData
 async fn create_token_handler(
     Json(payload): Json<CreateTokenRequest>,
 ) -> (StatusCode, Json<ApiResponse<InstructionData>>) {
+    if payload.mint.is_empty() || payload.mint_authority.is_empty() {
+        return error("Missing required fields");
+    }
     let mint_pubkey = match Pubkey::from_str(&payload.mint) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid mint address".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid mint address"),
     };
-
     let mint_authority_pubkey = match Pubkey::from_str(&payload.mint_authority) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid mint authority address".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid mint authority address"),
     };
-
     let instruction = match initialize_mint(
         &spl_token::id(),
         &mint_pubkey,
@@ -172,20 +165,10 @@ async fn create_token_handler(
         None,
         payload.decimals,
     ) {
-        Ok(instruction) => instruction,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Failed to create token instruction".to_string()),
-                }),
-            );
-        }
+        Ok(ix) => ix,
+        Err(_) => return error("Failed to create token instruction"),
     };
-
-    let accounts: Vec<Account> = instruction
+    let accounts = instruction
         .accounts
         .iter()
         .map(|acc| Account {
@@ -194,7 +177,6 @@ async fn create_token_handler(
             is_writable: acc.is_writable,
         })
         .collect();
-
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -212,48 +194,24 @@ async fn create_token_handler(
 async fn mint_token_handler(
     Json(payload): Json<MintTokenRequest>,
 ) -> (StatusCode, Json<ApiResponse<InstructionData>>) {
+    if payload.mint.is_empty() || payload.destination.is_empty() || payload.authority.is_empty() {
+        return error("Missing required fields");
+    }
+    if payload.amount == 0 {
+        return error("Amount must be greater than 0");
+    }
     let mint_pubkey = match Pubkey::from_str(&payload.mint) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid mint address".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid mint address"),
     };
-
     let destination_pubkey = match Pubkey::from_str(&payload.destination) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid destination address".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid destination address"),
     };
-
     let authority_pubkey = match Pubkey::from_str(&payload.authority) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid authority address".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid authority address"),
     };
-
     let instruction = match mint_to(
         &spl_token::id(),
         &mint_pubkey,
@@ -262,20 +220,10 @@ async fn mint_token_handler(
         &[],
         payload.amount,
     ) {
-        Ok(instruction) => instruction,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Failed to create mint instruction".to_string()),
-                }),
-            );
-        }
+        Ok(ix) => ix,
+        Err(_) => return error("Failed to create mint instruction"),
     };
-
-    let accounts: Vec<Account> = instruction
+    let accounts = instruction
         .accounts
         .iter()
         .map(|acc| Account {
@@ -284,7 +232,6 @@ async fn mint_token_handler(
             is_writable: acc.is_writable,
         })
         .collect();
-
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -303,47 +250,20 @@ async fn sign_message_handler(
     Json(payload): Json<SignMessageRequest>,
 ) -> (StatusCode, Json<ApiResponse<SignMessageData>>) {
     if payload.message.is_empty() || payload.secret.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                error: Some("Missing required fields".to_string()),
-            }),
-        );
+        return error("Missing required fields");
     }
-
     let secret_bytes = match bs58::decode(&payload.secret).into_vec() {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid secret key format".to_string()),
-                }),
-            );
-        }
+        Err(_) => return error("Invalid secret key format"),
     };
-
+    if secret_bytes.len() != 64 {
+        return error("Invalid secret key length");
+    }
     let keypair = match Keypair::from_bytes(&secret_bytes) {
-        Ok(keypair) => keypair,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid secret key".to_string()),
-                }),
-            );
-        }
+        Ok(kp) => kp,
+        Err(_) => return error("Invalid secret key"),
     };
-
-    let message_bytes = payload.message.as_bytes();
-    let signature = keypair.sign_message(message_bytes);
-
+    let signature = keypair.sign_message(payload.message.as_bytes());
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -362,75 +282,31 @@ async fn verify_message_handler(
     Json(payload): Json<VerifyMessageRequest>,
 ) -> (StatusCode, Json<ApiResponse<VerifyMessageData>>) {
     if payload.message.is_empty() || payload.signature.is_empty() || payload.pubkey.is_empty() {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                error: Some("Missing required fields".to_string()),
-            }),
-        );
+        return error("Missing required fields");
     }
-
     let pubkey_bytes = match bs58::decode(&payload.pubkey).into_vec() {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid public key format".to_string()),
-                }),
-            );
-        }
+        Err(_) => return error("Invalid public key format"),
     };
-
+    if pubkey_bytes.len() != 32 {
+        return error("Invalid public key length");
+    }
     let pubkey = match Pubkey::try_from(pubkey_bytes.as_slice()) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid public key".to_string()),
-                }),
-            );
-        }
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid public key"),
     };
-
     let signature_bytes = match general_purpose::STANDARD.decode(&payload.signature) {
         Ok(bytes) => bytes,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid signature format".to_string()),
-                }),
-            );
-        }
+        Err(_) => return error("Invalid signature format"),
     };
-
+    if signature_bytes.len() != 64 {
+        return error("Invalid signature length");
+    }
     let signature = match Signature::try_from(signature_bytes.as_slice()) {
-        Ok(signature) => signature,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid signature".to_string()),
-                }),
-            );
-        }
+        Ok(sig) => sig,
+        Err(_) => return error("Invalid signature"),
     };
-
-    let message_bytes = payload.message.as_bytes();
-    let is_valid = signature.verify(pubkey.as_ref(), message_bytes);
-
+    let is_valid = signature.verify(pubkey.as_ref(), payload.message.as_bytes());
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -448,51 +324,28 @@ async fn verify_message_handler(
 async fn send_sol_handler(
     Json(payload): Json<SendSolRequest>,
 ) -> (StatusCode, Json<ApiResponse<SolTransferData>>) {
-    let from_pubkey = match Pubkey::from_str(&payload.from) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid from address".to_string()),
-                }),
-            );
-        }
-    };
-
-    let to_pubkey = match Pubkey::from_str(&payload.to) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid to address".to_string()),
-                }),
-            );
-        }
-    };
-
-    if payload.lamports == 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                error: Some("Amount must be greater than 0".to_string()),
-            }),
-        );
+    if payload.from.is_empty() || payload.to.is_empty() {
+        return error("Missing required fields");
     }
-
+    if payload.lamports == 0 {
+        return error("Amount must be greater than 0");
+    }
+    let from_pubkey = match Pubkey::from_str(&payload.from) {
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid from address"),
+    };
+    let to_pubkey = match Pubkey::from_str(&payload.to) {
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid to address"),
+    };
+    if from_pubkey == to_pubkey {
+        return error("Cannot transfer to the same address");
+    }
     let instruction = system_instruction::transfer(&from_pubkey, &to_pubkey, payload.lamports);
     let accounts = vec![
         instruction.accounts[0].pubkey.to_string(),
         instruction.accounts[1].pubkey.to_string(),
     ];
-
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -510,62 +363,29 @@ async fn send_sol_handler(
 async fn send_token_handler(
     Json(payload): Json<SendTokenRequest>,
 ) -> (StatusCode, Json<ApiResponse<TokenTransferData>>) {
-    let destination_pubkey = match Pubkey::from_str(&payload.destination) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid destination address".to_string()),
-                }),
-            );
-        }
-    };
-
-    let mint_pubkey = match Pubkey::from_str(&payload.mint) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid mint address".to_string()),
-                }),
-            );
-        }
-    };
-
-    let owner_pubkey = match Pubkey::from_str(&payload.owner) {
-        Ok(pubkey) => pubkey,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Invalid owner address".to_string()),
-                }),
-            );
-        }
-    };
-
-    if payload.amount == 0 {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                success: false,
-                data: None,
-                error: Some("Amount must be greater than 0".to_string()),
-            }),
-        );
+    if payload.destination.is_empty() || payload.mint.is_empty() || payload.owner.is_empty() {
+        return error("Missing required fields");
     }
-
+    if payload.amount == 0 {
+        return error("Amount must be greater than 0");
+    }
+    let destination_pubkey = match Pubkey::from_str(&payload.destination) {
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid destination address"),
+    };
+    let mint_pubkey = match Pubkey::from_str(&payload.mint) {
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid mint address"),
+    };
+    let owner_pubkey = match Pubkey::from_str(&payload.owner) {
+        Ok(pk) => pk,
+        Err(_) => return error("Invalid owner address"),
+    };
+    if owner_pubkey == destination_pubkey {
+        return error("Cannot transfer to the same address");
+    }
     let source_ata = get_associated_token_address(&owner_pubkey, &mint_pubkey);
     let dest_ata = get_associated_token_address(&destination_pubkey, &mint_pubkey);
-
     let instruction = match transfer(
         &spl_token::id(),
         &source_ata,
@@ -574,28 +394,17 @@ async fn send_token_handler(
         &[],
         payload.amount,
     ) {
-        Ok(instruction) => instruction,
-        Err(_) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse {
-                    success: false,
-                    data: None,
-                    error: Some("Failed to create token transfer instruction".to_string()),
-                }),
-            );
-        }
+        Ok(ix) => ix,
+        Err(_) => return error("Failed to create token transfer instruction"),
     };
-
-    let accounts: Vec<TokenAccount> = instruction
+    let accounts = instruction
         .accounts
         .iter()
         .map(|acc| TokenAccount {
             pubkey: acc.pubkey.to_string(),
-            is_signer: acc.is_signer,
+            is_signer: acc.is_signer, // This will serialize as "isSigner"
         })
         .collect();
-
     (
         StatusCode::OK,
         Json(ApiResponse {
@@ -620,10 +429,8 @@ async fn main() {
         .route("/message/verify", post(verify_message_handler))
         .route("/send/sol", post(send_sol_handler))
         .route("/send/token", post(send_token_handler));
-
     let addr = SocketAddr::from(([127, 0, 0, 1], 7878));
     println!("Server listening on http://{}", addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
