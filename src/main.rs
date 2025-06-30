@@ -1,80 +1,153 @@
-use axum::{extract::Path, routing::get, Json, Router};
-use serde_json::json;
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
-use std::net::SocketAddr;
+use axum::{Json, Router, routing::post};
+use serde::{Deserialize, Serialize};
+use solana_sdk::{
+    instruction::{AccountMeta, Instruction},
+    pubkey::Pubkey,
+    signer::{Signer, keypair::Keypair},
+};
+use spl_token::instruction::{initialize_mint, mint_to};
+use std::{net::SocketAddr, str::FromStr};
 
-async fn root_handler() -> Json<serde_json::Value> {
-    Json(json!({
-        "message" : "Welcome to the Solana RPC API",
-        "endpoints": [
-            { "method": "GET", "path": "/account/:pubkey", "description": "Get account information by public key" },
-            { "method": "GET", "path": "/block/:block", "description": "Get block information by block number" }
-        ]
-    }))
+#[derive(Serialize)]
+struct ApiResponse<T> {
+    success: bool,
+    data: T,
 }
 
-async fn balance_handler(Path(pubkey): Path<String>) -> Json<serde_json::Value> {
-    let rpc_client = RpcClient::new("https://api.devnet.solana.com".to_string());
-    let pubkey = pubkey.parse::<Pubkey>().unwrap();
-    let lamports = rpc_client.get_balance(&pubkey).unwrap_or(0);
-    let sol = lamports as f64 / 1_000_000_000.0; // Convert lamports to SOL
-    Json(json!({
-        "pubkey": pubkey.to_string(),
-        "balance": sol,
-    }))
+#[derive(Serialize)]
+struct KeypairData {
+    pubkey: String,
+    secret: String,
 }
 
-async fn airdrop_handler(Path(pubkey): Path<String>) -> Json<serde_json::Value> {
-    let rpc_client = RpcClient::new("https://api.devnet.solana.com".to_string());
-    let pubkey = pubkey.parse::<Pubkey>().unwrap();
-    let signature = rpc_client.request_airdrop(&pubkey, 1_000_000_000).unwrap();
-
-    Json(json!({
-        "pubkey": pubkey.to_string(),
-        "signature": signature.to_string(),
-        "message": "Airdrop successful"
-    }))
+#[derive(Serialize)]
+struct Account {
+    pubkey: String,
+    is_signer: bool,
+    is_writable: bool,
 }
 
-async fn block_handler(Path(block): Path<u64>) -> Json<serde_json::Value> {
-    let rpc_client = RpcClient::new("https://api.devnet.solana.com".to_string());
-    let block = rpc_client.get_block(block).unwrap();
-
-    Json(json!({
-        "block": block.blockhash,
-        "transactions": block.transactions.len(),
-        "block_time": block.block_time
-    }))
+#[derive(Serialize)]
+struct InstructionData {
+    program_id: String,
+    accounts: Vec<Account>,
+    instruction_data: String,
 }
 
-async fn details_handler(Path(pubkey): Path<String>) -> Json<serde_json::Value> {
-    let rpc_client = RpcClient::new("https://api.devnet.solana.com".to_string());
-    let pubkey = pubkey.parse::<Pubkey>().unwrap();
-    let account_info = rpc_client.get_account(&pubkey).unwrap();
+#[derive(Deserialize)]
+struct CreateTokenRequest {
+    #[serde(rename = "mintAuthority")]
+    mint_authority: String,
+    mint: String,
+    decimals: u8,
+}
 
-    Json(json!({
-        "pubkey": pubkey.to_string(),
-        "lamports": account_info.lamports,
-        "owner": account_info.owner.to_string(),
-        "data_length": account_info.data.len(),
-        "executable": account_info.executable,
-        "rent_epoch": account_info.rent_epoch
-    }))
+#[derive(Deserialize)]
+struct MintTokenRequest {
+    mint: String,
+    destination: String,
+    authority: String,
+    amount: u64,
+}
+
+async fn generate_keypair_handler() -> Json<ApiResponse<KeypairData>> {
+    let keypair = Keypair::new();
+    let pubkey = bs58::encode(keypair.pubkey().to_bytes()).into_string();
+    let secret = bs58::encode(&keypair.to_bytes()).into_string();
+
+    Json(ApiResponse {
+        success: true,
+        data: KeypairData { pubkey, secret },
+    })
+}
+
+async fn create_token_handler(
+    Json(payload): Json<CreateTokenRequest>,
+) -> Json<ApiResponse<InstructionData>> {
+    let mint_pubkey = Pubkey::from_str(&payload.mint).unwrap();
+    let mint_authority_pubkey = Pubkey::from_str(&payload.mint_authority).unwrap();
+
+    let instruction = initialize_mint(
+        &spl_token::id(),
+        &mint_pubkey,
+        &mint_authority_pubkey,
+        None,
+        payload.decimals,
+    )
+    .unwrap();
+
+    let accounts: Vec<Account> = instruction
+        .accounts
+        .iter()
+        .map(|acc| Account {
+            pubkey: acc.pubkey.to_string(),
+            is_signer: acc.is_signer,
+            is_writable: acc.is_writable,
+        })
+        .collect();
+
+    Json(ApiResponse {
+        success: true,
+        data: InstructionData {
+            program_id: instruction.program_id.to_string(),
+            accounts,
+            instruction_data: base64::encode(&instruction.data),
+        },
+    })
+}
+
+async fn mint_token_handler(
+    Json(payload): Json<MintTokenRequest>,
+) -> Json<ApiResponse<InstructionData>> {
+    let mint_pubkey = Pubkey::from_str(&payload.mint).unwrap();
+    let destination_pubkey = Pubkey::from_str(&payload.destination).unwrap();
+    let authority_pubkey = Pubkey::from_str(&payload.authority).unwrap();
+
+    let instruction = mint_to(
+        &spl_token::id(),
+        &mint_pubkey,
+        &destination_pubkey,
+        &authority_pubkey,
+        &[],
+        payload.amount,
+    )
+    .unwrap();
+
+    let accounts: Vec<Account> = instruction
+        .accounts
+        .iter()
+        .map(|acc| Account {
+            pubkey: acc.pubkey.to_string(),
+            is_signer: acc.is_signer,
+            is_writable: acc.is_writable,
+        })
+        .collect();
+
+    Json(ApiResponse {
+        success: true,
+        data: InstructionData {
+            program_id: instruction.program_id.to_string(),
+            accounts,
+            instruction_data: base64::encode(&instruction.data),
+        },
+    })
 }
 
 #[tokio::main]
 async fn main() {
     let app = Router::new()
-        .route("/", get(root_handler))
-        .route("/account/:pubkey", get(balance_handler))
-        .route("/airdrop/:pubkey", get(airdrop_handler))
-        .route("/block/:block", get(block_handler))
-        .route("/details/:pubkey", get(details_handler));
+        .route("/keypair", post(generate_keypair_handler))
+        .route("/token/create", post(create_token_handler))
+        .route("/token/mint", post(mint_token_handler));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 7878));
 
     println!("Listening on http://{}", addr);
+    println!("Available endpoints:");
+    println!("  POST /keypair - Generate a new Solana keypair");
+    println!("  POST /token/create - Create a new SPL token");
+    println!("  POST /token/mint - Mint SPL tokens");
+
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
 }
